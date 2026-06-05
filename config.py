@@ -26,46 +26,66 @@ DATABASE_URL = os.getenv("DATABASE_URL") # format: postgresql+psycopg2://user:pa
 # Default Model settings
 MODEL_TYPE = os.getenv("MODEL_TYPE", "mock") # can be google_gemini, openai, anthropic, vertex_ai, ollama, mock
 
+# Environment Environment (dev or prod)
+ENV = os.getenv("ENV", "dev")
+
+def get_cloud_database_url():
+    """
+    Returns the cloud database connection URL rewritten with dev/prod suffix.
+    Example: postgresql+psycopg2://user:pass@host:port/LLM_chatbot_dev
+    """
+    if not DATABASE_URL:
+        return None
+    # Strip any trailing slashes
+    clean_url = DATABASE_URL.strip().rstrip('/')
+    # Split by the last slash to replace or append the database name
+    base_url = clean_url.rsplit('/', 1)[0]
+    db_name = "LLM_chatbot_prod" if ENV.lower() == "prod" else "LLM_chatbot_dev"
+    return f"{base_url}/{db_name}"
+
 def is_database_available():
     """Check if database connection string is provided."""
     return DATABASE_URL is not None and len(DATABASE_URL.strip()) > 0
 
+def initialize_sqlite_schema(conn):
+    """Reads schema.sql and runs it on the connection to set up tables."""
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    if os.path.exists(schema_path):
+        try:
+            with open(schema_path, 'r', encoding='utf-8') as f:
+                schema_sql = f.read()
+            cursor = conn.cursor()
+            cursor.executescript(schema_sql)
+            conn.commit()
+            logger.info("Successfully initialized SQLite schema from schema.sql.")
+        except Exception as e:
+            logger.error(f"Failed to initialize SQLite schema: {e}")
+    else:
+        logger.warning(f"schema.sql not found at {schema_path}! Cannot initialize database tables.")
+
 def get_database_connection():
     """
     Returns a database connection.
-    If DATABASE_URL is not configured, returns a mock in-memory SQLite connection for testing.
+    If DATABASE_URL is configured, connects to Cloud AlloyDB/PostgreSQL (dev or prod name).
+    Otherwise, connects to a local persistent SQLite file: LLM_chatbot_dev.db.
     """
     if is_database_available():
+        cloud_url = get_cloud_database_url()
         try:
             import psycopg2
-            conn = psycopg2.connect(DATABASE_URL)
-            logger.info("Successfully connected to the database (AlloyDB/PostgreSQL)")
+            conn = psycopg2.connect(cloud_url)
+            logger.info(f"Successfully connected to Cloud Database ({ENV} mode): {cloud_url.rsplit('/', 1)[-1]}")
             return conn
         except Exception as e:
-            logger.error(f"Failed to connect to database using DATABASE_URL: {e}. Falling back to SQLite.")
+            logger.error(f"Failed to connect to cloud database: {e}. Falling back to local SQLite.")
     
-    # Fallback to SQLite for local development
+    # Fallback to local persistent SQLite file
     import sqlite3
-    logger.info("Using local in-memory SQLite database as fallback connection.")
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    # Create mock tables
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            message_type TEXT,
-            content TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_namespace TEXT PRIMARY KEY,
-            profile_data TEXT
-        )
-    """)
-    conn.commit()
+    db_file = "LLM_chatbot_dev.db"
+    logger.info(f"Using local persistent SQLite database file: {db_file}")
+    conn = sqlite3.connect(db_file, check_same_thread=False)
+    # Initialize schema tables
+    initialize_sqlite_schema(conn)
     return conn
 
 # Mock Chat Model class for LangChain local testing

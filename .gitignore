@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Local SQLite databases
+LLM_chatbot_dev.db
+*.db
+
 # Python virtual environments
 .venv/
 venv/

@@ -132,3 +132,36 @@ flowchart TD
 * **設計**：在 LangGraph 反思節點優化 System Prompt 時，限制 LLM 生成的新指令在 `150 字以內`，且「極度簡練，排除贅詞」。
 * **效果**：防止反思出的 System Instructions 隨時間不斷膨脹（避免過度累積 Prompt context 導致後續對話成本遞增）。
 
+---
+
+## 6. 資料庫架構與環境分離設計 (Database Schema & Environment Separation) [NEW]
+
+為達到本地開發測試的實體儲存以及雲端部署的環境隔離，本系統設計了完整的資料庫儲存方案：
+
+### 6.1 資料表 Schema 設計 (schema.sql)
+專案內定義了 [schema.sql](file:///Users/alionking821/Documents/LLM_chatbot/schema.sql)，並在本地或雲端初始化時自動執行，包含以下三個核心資料表：
+
+1. **`chat_history` (對話歷史紀錄表)**：
+   * 用於持久化多輪對話歷史。
+   * 包含欄位：`id` (主鍵)、`session_id` (對話識別碼)、`message_type` ('human' 或 'ai')、`content` (訊息內文)、`timestamp` (時間戳記)。
+2. **`user_profiles` (使用者偏好與程序記憶表)**：
+   * 用於儲存使用者的投資偏好、風險度及從對話中學習到的提取知識 (Extracted Knowledge)。
+   * 包含欄位：`user_namespace` (隔離標籤，通常為 session_id)、`profile_data` (JSON 字串，包含偏好配置)。
+3. **`segmented_nodes` (財報分段與向量索引表)**：
+   * 用於本地 SQLite 的實體儲存。由於 SQLite 缺乏穩定的原生向量索引擴充套件，我們採取了**持久化儲存 + 記憶體即時構建**的混合方案：
+     * **Ingestion 階段**：將 LlamaIndex 切分好的 TextNode 文字、Metadata（以 JSON 格式）、以及生成的 Embedding 向量（以 JSON 陣列格式 `[0.12, -0.45, ...]`）儲存至資料表中。
+     * **Querying / 啟動階段**：如果 LlamaIndex 還沒有建立記憶體索引，則直接從 `segmented_nodes` 表中讀取所有節點與向量，在記憶體中還原為 `TextNode` 並重建 `VectorStoreIndex`。這確保了本地開發測試的持久性，同時避免了在 macOS 上編譯/安裝 sqlite-vss 的複雜環境依賴。
+   * 包含欄位：`node_id` (LlamaIndex 節點 ID)、`file_name` (來源財報檔名)、`text_content` (分塊文字)、`embedding_vector` (向量 JSON 陣列字串)、`metadata_json` (起點、會計季度、頁碼等中介資料的 JSON 字串)、`created_at` (時間戳記)。
+
+### 6.2 本地與雲端環境分離策略
+本系統透過 `ENV` 環境變數與 `DATABASE_URL` 的存在判定來控制資料庫連線目標：
+
+* **本地開發測試 (Local Environment)**：
+  * 當環境中未配置 `DATABASE_URL` 時，連線至專案底下的本地 SQLite 實體資料庫檔案 `LLM_chatbot_dev.db`。
+  * `LLM_chatbot_dev.db` 以及所有 `*.db` 檔案均已被加入 `.gitignore`，防止測試數據被 Commit 入庫。
+* **雲端部署環境 (GCP AlloyDB / Postgres)**：
+  * 當配置有 `DATABASE_URL` 時，系統會自動根據 `ENV` 環境變數動態重寫資料庫名稱後綴：
+    * `ENV=dev` (雲端測試環境)：資料庫名稱為 `LLM_chatbot_dev`
+    * `ENV=prod` (生產環境)：資料庫名稱為 `LLM_chatbot_prod`
+  * 雲端 AlloyDB 支援 `pgvector` 原生向量檢索，確保生產環境的高效檢索效能。
+

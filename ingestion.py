@@ -57,66 +57,131 @@ class IngestionPipeline:
         Settings.embed_model = self.embed_model
         Settings.llm = self.llm
         
-    def run_pipeline(self):
+    def run_pipeline(self, force_reindex: bool = False):
         """
         Executes the ingestion pipeline:
-        1. Loads documents from directory
-        2. Applies SemanticSplitterNodeParser (threshold=95)
-        3. Applies SentenceWindowNodeParser (window_size=3)
-        4. Extracts and assigns SEC metadata
-        5. Builds VectorStoreIndex and SimpleKeywordTableIndex
+        1. If force_reindex is False, checks if nodes exist in SQLite segmented_nodes table.
+           If they do, loads nodes from the DB, reconstructs TextNode objects, and builds indexes.
+        2. Otherwise, loads documents from directory, applies SemanticSplitterNodeParser,
+           applies SentenceWindowNodeParser, extracts SEC metadata, calculates embeddings,
+           saves to SQLite DB, and builds indexes.
         Returns (vector_index, keyword_index, retriever)
         """
-        logger.info(f"Starting Ingestion Pipeline for directory: {self.data_dir}")
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
-            logger.warning(f"Created empty directory: {self.data_dir}")
-            
-        # 1. Load documents
-        reader = SimpleDirectoryReader(self.data_dir)
-        documents = reader.load_data()
+        logger.info(f"Starting Ingestion Pipeline. Directory: {self.data_dir}, force_reindex: {force_reindex}")
         
-        if not documents:
-            logger.warning("No documents found in the ingestion directory.")
+        final_nodes = []
+        loaded_from_db = False
+        
+        if not force_reindex:
+            try:
+                conn = config.get_database_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM segmented_nodes")
+                count = cursor.fetchone()[0]
+                if count > 0:
+                    logger.info(f"Found {count} segmented nodes in database. Loading...")
+                    cursor.execute("SELECT node_id, file_name, text_content, embedding_vector, metadata_json FROM segmented_nodes")
+                    rows = cursor.fetchall()
+                    
+                    import json
+                    from llama_index.core.schema import TextNode
+                    
+                    for row in rows:
+                        node_id, file_name, text_content, embedding_vector, metadata_json = row
+                        try:
+                            embedding = json.loads(embedding_vector)
+                        except Exception:
+                            embedding = None
+                        try:
+                            metadata = json.loads(metadata_json)
+                        except Exception:
+                            metadata = {}
+                            
+                        node = TextNode(
+                            text=text_content,
+                            id_=node_id,
+                            embedding=embedding,
+                            metadata=metadata
+                        )
+                        final_nodes.append(node)
+                    loaded_from_db = True
+                    logger.info(f"Successfully loaded {len(final_nodes)} nodes from database.")
+                conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to load nodes from database: {e}. Falling back to parsing documents.")
+                final_nodes = []
+                
+        if not loaded_from_db:
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+                logger.warning(f"Created empty directory: {self.data_dir}")
+                
+            # 1. Load documents
+            reader = SimpleDirectoryReader(self.data_dir)
+            documents = reader.load_data()
+            
+            if not documents:
+                logger.warning("No documents found in the ingestion directory.")
+                return None, None, None
+                
+            # Extract global metadata from document contents
+            for doc in documents:
+                extracted = extract_sec_metadata(doc.text)
+                doc.metadata.update(extracted)
+                logger.info(f"Extracted document metadata: {doc.metadata}")
+                
+            # 2. Semantic Node Parser
+            semantic_parser = SemanticSplitterNodeParser(
+                buffer_size=1, 
+                breakpoint_percentile_threshold=95,
+                embed_model=self.embed_model
+            )
+            
+            # 3. Sentence Window Parser
+            window_parser = SentenceWindowNodeParser(
+                window_size=3,
+                window_metadata_key="window",
+                original_text_metadata_key="original_text"
+            )
+            
+            # Parse documents to nodes
+            logger.info("Parsing documents with Semantic Splitter...")
+            semantic_nodes = semantic_parser.get_nodes_from_documents(documents)
+            
+            logger.info("Parsing semantic nodes with Sentence Window...")
+            final_nodes = window_parser.get_nodes_from_documents(semantic_nodes)
+            
+            logger.info(f"Successfully processed {len(documents)} document(s) into {len(final_nodes)} sentence-window nodes. Generating embeddings...")
+            
+            # Generate embeddings and save to database
+            import json
+            conn = config.get_database_connection()
+            cursor = conn.cursor()
+            
+            for node in final_nodes:
+                if node.embedding is None:
+                    try:
+                        node.embedding = self.embed_model.get_text_embedding(node.get_content(metadata_mode="embed"))
+                    except Exception as e:
+                        logger.warning(f"Failed to generate embedding for node {node.node_id}: {e}")
+                
+                # Save to database
+                file_name = node.metadata.get("file_name") or os.path.basename(node.metadata.get("file_path", "unknown"))
+                embedding_vector = json.dumps(node.embedding) if node.embedding is not None else "[]"
+                metadata_json = json.dumps(node.metadata)
+                
+                cursor.execute(
+                    "INSERT OR REPLACE INTO segmented_nodes (node_id, file_name, text_content, embedding_vector, metadata_json) VALUES (?, ?, ?, ?, ?)",
+                    (node.node_id, file_name, node.text, embedding_vector, metadata_json)
+                )
+            conn.commit()
+            conn.close()
+            logger.info(f"Successfully saved {len(final_nodes)} segmented nodes to database.")
+            
+        if not final_nodes:
+            logger.warning("No nodes available to build indices.")
             return None, None, None
             
-        # Extract global metadata from document contents
-        for doc in documents:
-            extracted = extract_sec_metadata(doc.text)
-            doc.metadata.update(extracted)
-            logger.info(f"Extracted document metadata: {doc.metadata}")
-            
-        # 2. Semantic Node Parser
-        # breakpoint_percentile_threshold=95 per doc/overview requirements
-        semantic_parser = SemanticSplitterNodeParser(
-            buffer_size=1, 
-            breakpoint_percentile_threshold=95,
-            embed_model=self.embed_model
-        )
-        
-        # 3. Sentence Window Parser
-        # window_size=3 per overview requirement (doc.md specified window_size=2)
-        window_parser = SentenceWindowNodeParser(
-            window_size=3,
-            window_metadata_key="window",
-            original_text_metadata_key="original_text"
-        )
-        
-        # Parse documents to nodes
-        logger.info("Parsing documents with Semantic Splitter...")
-        semantic_nodes = semantic_parser.get_nodes_from_documents(documents)
-        
-        logger.info("Parsing semantic nodes with Sentence Window...")
-        final_nodes = window_parser.get_nodes_from_documents(semantic_nodes)
-        
-        # Keep SEC metadata flowing to child nodes
-        for node in final_nodes:
-            # Re-verify and ensure all parent metadata is present
-            if node.parent_node:
-                pass # metadata is automatically inherited by standard node parsers, but let's double check
-            
-        logger.info(f"Successfully processed {len(documents)} document(s) into {len(final_nodes)} sentence-window nodes.")
-        
         # 4. Build indices
         logger.info("Building VectorStoreIndex...")
         vector_index = VectorStoreIndex(final_nodes)
@@ -125,14 +190,13 @@ class IngestionPipeline:
         keyword_index = SimpleKeywordTableIndex(final_nodes)
         
         # 5. Create hybrid retriever using QueryFusionRetriever with Reciprocal Rerank Fusion (RRF)
-        # We query both indices for comprehensive coverage.
         vector_retriever = vector_index.as_retriever(similarity_top_k=5)
         keyword_retriever = keyword_index.as_retriever(similarity_top_k=5)
         
         fusion_retriever = QueryFusionRetriever(
             retrievers=[vector_retriever, keyword_retriever],
             similarity_top_k=5,
-            num_queries=1, # no query expansion to avoid infinite LLM calls in test
+            num_queries=1,
             mode="reciprocal_rerank",
             use_async=False,
             verbose=True
