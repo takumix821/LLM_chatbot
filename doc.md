@@ -94,29 +94,23 @@ postprocessor = SimilarityPostprocessor(similarity_cutoff=0.78)
 --------------------------------------------------------------------------------
 
 
-5. GCP AlloyDB 環境與對話持久化
+5. GCP BigQuery 環境與對話持久化
 
-在生產環境中，我們利用 GCP 的 AlloyDB 實現向量數據與對話歷史的統一存儲。
+在生產環境中，我們利用 GCP 的 BigQuery 實現對話歷史、使用者偏好以及分塊數據的統一存儲。
 
-* 持久化記憶：使用 langchain-postgres 提供的 PostgresChatMessageHistory，確保存儲在資料庫中而非記憶體，支持跨會話的 Context 恢復。
+* 持久化記憶：採用 BigQuery 客製化連線包裝實作，並使用 DELETE + INSERT 保證 SQL 相容性，確保存儲在資料集而非記憶體，支持跨會話的 Context 恢復與偏好更新。
 
-Pseudo Code：AlloyDB 整合
+Pseudo Code：BigQuery 整合
 
-from langchain_postgres import PostgresChatMessageHistory
-from llama_index.vector_stores.alloydb import AlloyDBVectorStore
+from google.cloud import bigquery
 
-# 初始化 AlloyDB 向量存儲與對話歷史
-vector_store = AlloyDBVectorStore(engine=alloydb_engine, table_name="financial_reports")
+# 初始化 BigQuery 客戶端與作業設定
+client = bigquery.Client(project="your_project_id")
+job_config = bigquery.QueryJobConfig(default_dataset="your_project_id.LLM_chatbot_dev")
 
-# 對話歷史實作 (Hot Path 存取)
-history = PostgresChatMessageHistory(
-    table_name="chat_history",
-    session_id="fin_session_001",
-    sync_connection=conn
-)
-
-# 系統會自動將 HumanMessage 與 AIMessage 寫入 AlloyDB 表格
-history.add_user_message("分析 2024Q1 營收成長")
+# 寫入對話歷史
+sql = "INSERT INTO chat_history (session_id, message_type, content) VALUES (?, ?, ?)"
+client.query(sql, job_config=job_config)
 
 
 

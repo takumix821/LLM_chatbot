@@ -12,7 +12,7 @@ GCP 智能財報分析助手：系統架構與部署規範文件
 
 * Loading (資料載入)：原始財報文件（PDF/Excel）存放於 Google Cloud Storage (GCS)，透過 LlamaIndex 進行異步讀取。
 * Indexing (索引建構)：文件被拆解為 Nodes（LlamaIndex 的原子資料單元），進行語意分塊並生成嵌入向量。
-* Storing (儲存)：使用 AlloyDB (Postgres-compatible) 作為核心後端，利用其 pgvector 擴充功能，同時存儲向量數據、Metadata 以及對話歷史。
+* Storing (儲存)：使用 GCP BigQuery 作為核心後端，同時儲存分段資料、向量數據（以 JSON 陣列表示並在記憶體中還原為索引）、Metadata 以及對話歷史。開發與生產環境透過 Dataset 名稱進行隔離。
 * Querying (查詢與生成)：透過 Cloud Run 上的 FastAPI 服務接收請求，執行 Agentic RAG 邏輯，並由 Vertex AI 或跨供應商模型生成回答。
 
 
@@ -53,14 +53,14 @@ GCP 智能財報分析助手：系統架構與部署規範文件
 --------------------------------------------------------------------------------
 
 
-4. 語意記憶與狀態管理 (Conversational Memory & AlloyDB)
+4. 語意記憶與狀態管理 (Conversational Memory & BigQuery)
 
-為實現具備「長期記憶」的財務顧問體驗，系統利用 AlloyDB 與 langchain-postgres 進行狀態管理。
+為實現具備「長期記憶」的財務顧問體驗，系統利用 GCP BigQuery 進行狀態管理與對話歷史儲存。
 
-* 對話狀態持久化：使用 PostgresChatMessageHistory 實作。每個用戶對話均受 Namespace 隔離，確保數據隱私與隔離性。
+* 對話狀態持久化：使用 BigQuery 連線包裝實作。每個用戶對話均受 Namespace 隔離，確保數據隱私與隔離性。
 * 長期記憶與反思機制 (Reflection)：
   * 在 LangGraph 中設計異步 Reflection Node。當對話結束時，系統自動回顧對話，提取用戶偏好。
-  * Profile 更新：將提取的資訊更新至儲存在 AlloyDB 中的 JSON Profile。
+  * Profile 更新：將提取的資訊更新至儲存在 BigQuery 中的 JSON Profile。
 
 用戶偏好 Profile (JSON 範例)：
 
@@ -116,10 +116,10 @@ GCP 智能財報分析助手：系統架構與部署規範文件
 系統封裝為 Docker 容器，利用 Cloud Run 的 Serverless 優勢，結合 Secret Manager 管理敏感金鑰。
 
 * 部署檢查清單 (Pre-deployment Checklist)：
-  * [ ] AlloyDB: 實例已啟用 google_ml_integration 與 pgvector 擴充功能。
-  * [ ] IAM Roles: 運行帳戶具備 roles/alloydb.client, roles/storage.objectViewer, roles/secretmanager.secretAccessor。
-  * [ ] Networking: 已配置 VPC Connector 或 Direct VPC Egress，確保 Cloud Run 可透過私網存取 AlloyDB。
-  * [ ] Secret Manager: 已存儲 DATABASE_URL 與各供應商 API Keys。
+  * [ ] BigQuery: 已在 GCP 專案中啟用 BigQuery API，並建立對應的 Dataset (如 LLM_chatbot_dev)。
+  * [ ] IAM Roles: 運行帳戶具備 roles/bigquery.admin (或 bigquery.dataEditor 暨 bigquery.user), roles/storage.objectViewer, roles/secretmanager.secretAccessor。
+  * [ ] Networking: 確保 Cloud Run 服務可直接透過 API 呼叫存取 GCP BigQuery。
+  * [ ] Secret Manager: 已存儲 BIGQUERY_PROJECT 與各供應商 API Keys。
   * [ ] Environment Variables: MODEL_TYPE, GCS_BUCKET_NAME, LOG_LEVEL 已正確配置。
 
 

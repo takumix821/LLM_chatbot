@@ -77,7 +77,8 @@ class IngestionPipeline:
                 conn = config.get_database_connection()
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM segmented_nodes")
-                count = cursor.fetchone()[0]
+                row = cursor.fetchone()
+                count = row[0] if row is not None else 0
                 if count > 0:
                     logger.info(f"Found {count} segmented nodes in database. Loading...")
                     cursor.execute("SELECT node_id, file_name, text_content, embedding_vector, metadata_json FROM segmented_nodes")
@@ -153,11 +154,7 @@ class IngestionPipeline:
             
             logger.info(f"Successfully processed {len(documents)} document(s) into {len(final_nodes)} sentence-window nodes. Generating embeddings...")
             
-            # Generate embeddings and save to database
-            import json
-            conn = config.get_database_connection()
-            cursor = conn.cursor()
-            
+            # Generate embeddings
             for node in final_nodes:
                 if node.embedding is None:
                     try:
@@ -165,18 +162,70 @@ class IngestionPipeline:
                     except Exception as e:
                         logger.warning(f"Failed to generate embedding for node {node.node_id}: {e}")
                 
-                # Save to database
-                file_name = node.metadata.get("file_name") or os.path.basename(node.metadata.get("file_path", "unknown"))
-                embedding_vector = json.dumps(node.embedding) if node.embedding is not None else "[]"
-                metadata_json = json.dumps(node.metadata)
-                
-                cursor.execute(
-                    "INSERT OR REPLACE INTO segmented_nodes (node_id, file_name, text_content, embedding_vector, metadata_json) VALUES (?, ?, ?, ?, ?)",
-                    (node.node_id, file_name, node.text, embedding_vector, metadata_json)
-                )
-            conn.commit()
+            # Save to database
+            import json
+            conn = config.get_database_connection()
+            
+            if hasattr(conn, "client"):  # GCP BigQuery Connection
+                try:
+                    cursor = conn.cursor()
+                    node_ids = [node.node_id for node in final_nodes]
+                    logger.info(f"Batch deleting {len(node_ids)} existing nodes from BigQuery...")
+                    # Delete in chunks of 500 to stay within query limits
+                    for i in range(0, len(node_ids), 500):
+                        chunk = node_ids[i:i+500]
+                        placeholders = ",".join(["?"] * len(chunk))
+                        cursor.execute(f"DELETE FROM segmented_nodes WHERE node_id IN ({placeholders})", chunk)
+                    
+                    # Prepare rows for streaming insert
+                    table_id = f"{conn.client.project}.{conn.dataset_name}.segmented_nodes"
+                    rows_to_insert = []
+                    for node in final_nodes:
+                        file_name = node.metadata.get("file_name") or os.path.basename(node.metadata.get("file_path", "unknown"))
+                        embedding_vector = json.dumps(node.embedding) if node.embedding is not None else "[]"
+                        metadata_json = json.dumps(node.metadata)
+                        rows_to_insert.append({
+                            "node_id": node.node_id,
+                            "file_name": file_name,
+                            "text_content": node.text,
+                            "embedding_vector": embedding_vector,
+                            "metadata_json": metadata_json
+                        })
+                    logger.info(f"Batch inserting {len(rows_to_insert)} nodes to BigQuery...")
+                    errors = conn.client.insert_rows_json(table_id, rows_to_insert)
+                    if errors:
+                        logger.error(f"Failed to batch insert rows to BigQuery: {errors}")
+                        raise RuntimeError(f"BigQuery batch insert failed: {errors}")
+                    else:
+                        logger.info(f"Successfully batch saved {len(final_nodes)} segmented nodes to BigQuery.")
+                except Exception as e:
+                    logger.error(f"Failed to execute batch operations on BigQuery: {e}. Falling back to row-by-row execute.")
+                    # Fallback row-by-row on BigQuery just in case
+                    cursor = conn.cursor()
+                    for node in final_nodes:
+                        file_name = node.metadata.get("file_name") or os.path.basename(node.metadata.get("file_path", "unknown"))
+                        embedding_vector = json.dumps(node.embedding) if node.embedding is not None else "[]"
+                        metadata_json = json.dumps(node.metadata)
+                        cursor.execute("DELETE FROM segmented_nodes WHERE node_id = ?", (node.node_id,))
+                        cursor.execute(
+                            "INSERT INTO segmented_nodes (node_id, file_name, text_content, embedding_vector, metadata_json) VALUES (?, ?, ?, ?, ?)",
+                            (node.node_id, file_name, node.text, embedding_vector, metadata_json)
+                        )
+            else:  # SQLite Connection
+                cursor = conn.cursor()
+                for node in final_nodes:
+                    file_name = node.metadata.get("file_name") or os.path.basename(node.metadata.get("file_path", "unknown"))
+                    embedding_vector = json.dumps(node.embedding) if node.embedding is not None else "[]"
+                    metadata_json = json.dumps(node.metadata)
+                    cursor.execute("DELETE FROM segmented_nodes WHERE node_id = ?", (node.node_id,))
+                    cursor.execute(
+                        "INSERT INTO segmented_nodes (node_id, file_name, text_content, embedding_vector, metadata_json) VALUES (?, ?, ?, ?, ?)",
+                        (node.node_id, file_name, node.text, embedding_vector, metadata_json)
+                    )
+                conn.commit()
+                logger.info(f"Successfully saved {len(final_nodes)} segmented nodes to SQLite database.")
+            
             conn.close()
-            logger.info(f"Successfully saved {len(final_nodes)} segmented nodes to database.")
             
         if not final_nodes:
             logger.warning("No nodes available to build indices.")

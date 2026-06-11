@@ -18,7 +18,7 @@ flowchart TD
         GCS[(Google Cloud Storage)] -->|讀取 PDF/TXT| Reader[SimpleDirectoryReader]
         Reader -->|文章分段| Splitter[Semantic & Sentence Window Splitter]
         Splitter -->|計算向量| Embed[Vertex AI/Gemini Embedding]
-        Embed -->|儲存| AlloyDB[(GCP AlloyDB Vector Store)]
+        Embed -->|儲存| BigQuery[(GCP BigQuery Data Store)]
     end
 
     subgraph 在線對話 (Online Querying)
@@ -27,7 +27,7 @@ flowchart TD
         Router -->|一般對話| Chat[閒聊節點 / Chitchat Node]
         
         Condense -->|檢索問題向量| Retrieve[混合檢索 QueryFusionRetriever]
-        AlloyDB -.->|相似度比對| Retrieve
+        BigQuery -.->|相似度比對| Retrieve
         Retrieve -->|篩選門檻| Filter[SimilarityPostprocessor]
         
         Filter -->|XML 隔離上下文| LLM[LLM 回答生成]
@@ -57,8 +57,8 @@ flowchart TD
    * **技術**：正則表達式 (Regex) 與特徵提取器。
    * **作用**：自動提取 `company_code` (如 AAPL)、`fiscal_year` (如 2026)、`quarter` (如 Q1) 以及 `important_metrics` (如 Revenue, Gross Margin)，以便進行 Metadata 過濾。
 5. **向量化與儲存 (Storing)**：
-   * **技術**：Vertex AI Embedding 或 Gemini Embedding，搭配 GCP AlloyDB (開啟 `pgvector` 擴充)。
-   * **作用**：儲存 Nodes 的原始文本、Metadata 與其 768/1536 維度的向量。
+   * **技術**：Vertex AI Embedding 或 Gemini Embedding，搭配 GCP BigQuery 欄位儲存。
+   * **作用**：將 Nodes 的原始文本、Metadata 與其向量以 JSON 形式（在本地與雲端皆同）儲存於 BigQuery 資料表中，並在服務啟動時載入至記憶體重構 LlamaIndex，確保無本地編譯依賴。
 
 ---
 
@@ -68,7 +68,7 @@ flowchart TD
 
 ### 核心技術與步驟：
 1. **對話歷史與意圖路由 (Intent Routing)**：
-   * **技術**：`LangGraph` + `PostgresChatMessageHistory`。
+   * **技術**：`LangGraph` + BigQuery 連線包裝。
    * **作用**：自動判定使用者是「日常閒聊」還是「財報數據詢問」，閒聊則直接回覆以省下檢索成本。
 2. **問題濃縮 (Query Condensing)**：
    * **技術**：LangChain LLM Chain。
@@ -87,7 +87,7 @@ flowchart TD
    * **作用**：使用 `compact` 引用友善模式合成回答，並由驗證節點檢查內容中是否包含安全注入漏洞，保證合規審計。
 7. **長期記憶與反思 (Reflection & Preferences)**：
    * **技術**：LangGraph 異步 `Reflection Node`。
-   * **作用**：根據使用者的查詢偏好，動態更新 AlloyDB 中的 JSON Profile 指令儲存。
+   * **作用**：根據使用者的查詢偏好，動態更新 BigQuery 中的 JSON Profile 指令儲存。
 
 ---
 
@@ -148,20 +148,19 @@ flowchart TD
    * 用於儲存使用者的投資偏好、風險度及從對話中學習到的提取知識 (Extracted Knowledge)。
    * 包含欄位：`user_namespace` (隔離標籤，通常為 session_id)、`profile_data` (JSON 字串，包含偏好配置)。
 3. **`segmented_nodes` (財報分段與向量索引表)**：
-   * 用於本地 SQLite 的實體儲存。由於 SQLite 缺乏穩定的原生向量索引擴充套件，我們採取了**持久化儲存 + 記憶體即時構建**的混合方案：
+   * 用於存取財報向量數據。
      * **Ingestion 階段**：將 LlamaIndex 切分好的 TextNode 文字、Metadata（以 JSON 格式）、以及生成的 Embedding 向量（以 JSON 陣列格式 `[0.12, -0.45, ...]`）儲存至資料表中。
-     * **Querying / 啟動階段**：如果 LlamaIndex 還沒有建立記憶體索引，則直接從 `segmented_nodes` 表中讀取所有節點與向量，在記憶體中還原為 `TextNode` 並重建 `VectorStoreIndex`。這確保了本地開發測試的持久性，同時避免了在 macOS 上編譯/安裝 sqlite-vss 的複雜環境依賴。
+     * **Querying / 啟動階段**：如果 LlamaIndex 還沒有建立記憶體索引，則直接從 `segmented_nodes` 表中讀取所有節點與向量，在記憶體中還原為 `TextNode` 並重建 `VectorStoreIndex`。這確保了本地開發測試的持久性，同時避免了在 macOS 上編譯/安裝複雜環境依賴。
    * 包含欄位：`node_id` (LlamaIndex 節點 ID)、`file_name` (來源財報檔名)、`text_content` (分塊文字)、`embedding_vector` (向量 JSON 陣列字串)、`metadata_json` (起點、會計季度、頁碼等中介資料的 JSON 字串)、`created_at` (時間戳記)。
 
 ### 6.2 本地與雲端環境分離策略
-本系統透過 `ENV` 環境變數與 `DATABASE_URL` 的存在判定來控制資料庫連線目標：
+本系統透過 ENV 環境變數與 BIGQUERY_PROJECT 的存在判定來控制資料庫連線目標：
 
 * **本地開發測試 (Local Environment)**：
-  * 當環境中未配置 `DATABASE_URL` 時，連線至專案底下的本地 SQLite 實體資料庫檔案 `LLM_chatbot_dev.db`。
-  * `LLM_chatbot_dev.db` 以及所有 `*.db` 檔案均已被加入 `.gitignore`，防止測試數據被 Commit 入庫。
-* **雲端部署環境 (GCP AlloyDB / Postgres)**：
-  * 當配置有 `DATABASE_URL` 時，系統會自動根據 `ENV` 環境變數動態重寫資料庫名稱後綴：
-    * `ENV=dev` (雲端測試環境)：資料庫名稱為 `LLM_chatbot_dev`
-    * `ENV=prod` (生產環境)：資料庫名稱為 `LLM_chatbot_prod`
-  * 雲端 AlloyDB 支援 `pgvector` 原生向量檢索，確保生產環境的高效檢索效能。
-
+  * 當環境中未配置 BIGQUERY_PROJECT 時，連線至專案底下的本地 SQLite 實體資料庫檔案 LLM_chatbot_dev.db。
+  * LLM_chatbot_dev.db 以及所有 *.db 檔案均已被加入 .gitignore，防止測試數據被 Commit 入庫。
+* **雲端部署環境 (GCP BigQuery)**：
+  * 當配置有 BIGQUERY_PROJECT 時，系統會自動根據 ENV 環境變數動態建立並連線至對應的 Dataset 資料集：
+    * ENV=dev (雲端測試環境)：Dataset 名稱為 LLM_chatbot_dev
+    * ENV=prod (生產環境)：Dataset 名稱為 LLM_chatbot_prod
+  * 系統啟動時會透過 client.create_dataset() 自動確認並初始化對應的 Dataset 與 Tables。

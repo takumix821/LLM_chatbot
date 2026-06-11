@@ -20,32 +20,107 @@ VERTEX_API_KEY = os.getenv("VERTEX_API_KEY") # or GCP Credentials
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "mock_line_channel_access_token")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "mock_line_channel_secret")
 
-# Database (AlloyDB / Postgres)
-DATABASE_URL = os.getenv("DATABASE_URL") # format: postgresql+psycopg2://user:password@host:port/dbname
+# Database (GCP BigQuery)
+BIGQUERY_PROJECT = os.getenv("BIGQUERY_PROJECT")
+if BIGQUERY_PROJECT and not os.getenv("GOOGLE_CLOUD_PROJECT"):
+    os.environ["GOOGLE_CLOUD_PROJECT"] = BIGQUERY_PROJECT
 
 # Default Model settings
 MODEL_TYPE = os.getenv("MODEL_TYPE", "mock") # can be google_gemini, openai, anthropic, vertex_ai, ollama, mock
 
-# Environment Environment (dev or prod)
+# Environment (dev or prod)
 ENV = os.getenv("ENV", "dev")
 
-def get_cloud_database_url():
-    """
-    Returns the cloud database connection URL rewritten with dev/prod suffix.
-    Example: postgresql+psycopg2://user:pass@host:port/LLM_chatbot_dev
-    """
-    if not DATABASE_URL:
+class BigQueryCursorWrapper:
+    def __init__(self, client, dataset_name):
+        self.client = client
+        self.dataset_name = dataset_name
+        self._results = []
+        self._row_idx = 0
+
+    def execute(self, sql, params=None):
+        from google.cloud import bigquery
+        
+        # BigQuery positional parameters style matches standard '?' in standard SQL, mapped using ScalarQueryParameter
+        query_params = []
+        if params:
+            if not isinstance(params, (list, tuple)):
+                params = (params,)
+            
+            for val in params:
+                if isinstance(val, int):
+                    param_type = "INT64"
+                elif isinstance(val, float):
+                    param_type = "FLOAT64"
+                elif isinstance(val, bool):
+                    param_type = "BOOL"
+                else:
+                    param_type = "STRING"
+                query_params.append(bigquery.ScalarQueryParameter(None, param_type, val))
+
+        job_config = bigquery.QueryJobConfig(
+            default_dataset=f"{self.client.project}.{self.dataset_name}"
+        )
+        if query_params:
+            job_config.query_parameters = query_params
+
+        logger.info(f"Executing BigQuery: {sql} with params {params}")
+        query_job = self.client.query(sql, job_config=job_config)
+        result = query_job.result()
+        
+        self._results = []
+        if result is not None:
+            try:
+                for row in result:
+                    if row is not None:
+                        try:
+                            self._results.append(tuple(row))
+                        except TypeError:
+                            pass
+            except TypeError:
+                pass
+        self._row_idx = 0
+
+    def fetchone(self):
+        if self._row_idx < len(self._results):
+            row = self._results[self._row_idx]
+            self._row_idx += 1
+            return row
         return None
-    # Strip any trailing slashes
-    clean_url = DATABASE_URL.strip().rstrip('/')
-    # Split by the last slash to replace or append the database name
-    base_url = clean_url.rsplit('/', 1)[0]
-    db_name = "LLM_chatbot_prod" if ENV.lower() == "prod" else "LLM_chatbot_dev"
-    return f"{base_url}/{db_name}"
+
+    def fetchall(self):
+        res = self._results[self._row_idx:]
+        self._row_idx = len(self._results)
+        return res
+
+class BigQueryConnectionWrapper:
+    def __init__(self, project_id, dataset_name):
+        from google.cloud import bigquery
+        self.client = bigquery.Client(project=project_id)
+        self.dataset_name = dataset_name
+        self.dataset_ref = self.client.dataset(dataset_name)
+        
+        # Create dataset if not exists
+        try:
+            self.client.get_dataset(self.dataset_ref)
+        except Exception:
+            dataset = bigquery.Dataset(self.dataset_ref)
+            dataset.location = "US"
+            self.client.create_dataset(dataset, timeout=30)
+            logger.info(f"Created BigQuery dataset: {dataset_name}")
+
+    def cursor(self):
+        return BigQueryCursorWrapper(self.client, self.dataset_name)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
 
 def is_database_available():
-    """Check if database connection string is provided."""
-    return DATABASE_URL is not None and len(DATABASE_URL.strip()) > 0
+    """Check if GCP BigQuery configuration is provided."""
+    return BIGQUERY_PROJECT is not None and len(BIGQUERY_PROJECT.strip()) > 0
 
 def initialize_sqlite_schema(conn):
     """Reads schema.sql and runs it on the connection to set up tables."""
@@ -63,21 +138,64 @@ def initialize_sqlite_schema(conn):
     else:
         logger.warning(f"schema.sql not found at {schema_path}! Cannot initialize database tables.")
 
+def initialize_bq_schema(client, dataset_name):
+    """Translates schema.sql to BigQuery syntax and initializes tables."""
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    if os.path.exists(schema_path):
+        try:
+            with open(schema_path, 'r', encoding='utf-8') as f:
+                schema_sql = f.read()
+            
+            # Simple translator from SQLite to BigQuery syntax
+            statements = schema_sql.split(';')
+            for stmt in statements:
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                # Translate types & constraints
+                stmt_bq = stmt
+                stmt_bq = stmt_bq.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "STRING DEFAULT GENERATE_UUID()")
+                stmt_bq = stmt_bq.replace("TEXT PRIMARY KEY", "STRING")
+                stmt_bq = stmt_bq.replace("TEXT", "STRING")
+                stmt_bq = stmt_bq.replace("DATETIME DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP()")
+                stmt_bq = stmt_bq.replace("PRIMARY KEY", "") # remove other primary keys
+                
+                from google.cloud import bigquery
+                job_config = bigquery.QueryJobConfig(
+                    default_dataset=f"{client.project}.{dataset_name}"
+                )
+                query_job = client.query(stmt_bq, job_config=job_config)
+                query_job.result()
+            logger.info("Successfully initialized BigQuery schema from schema.sql translation.")
+        except Exception as e:
+            logger.error(f"Failed to initialize BigQuery schema: {e}")
+    else:
+        logger.warning(f"schema.sql not found at {schema_path}! Cannot initialize BigQuery tables.")
+
 def get_database_connection():
     """
     Returns a database connection.
-    If DATABASE_URL is configured, connects to Cloud AlloyDB/PostgreSQL (dev or prod name).
+    If BIGQUERY_PROJECT is configured (and not running in pytest unit tests),
+    connects to GCP BigQuery (dataset name dev/prod).
     Otherwise, connects to a local persistent SQLite file: LLM_chatbot_dev.db.
     """
+    if is_testing():
+        # Force local SQLite during unit tests to isolate cloud datasets
+        import sqlite3
+        db_file = "LLM_chatbot_test.db"
+        conn = sqlite3.connect(db_file, check_same_thread=False)
+        initialize_sqlite_schema(conn)
+        return conn
+
     if is_database_available():
-        cloud_url = get_cloud_database_url()
+        db_name = "LLM_chatbot_prod" if ENV.lower() == "prod" else "LLM_chatbot_dev"
         try:
-            import psycopg2
-            conn = psycopg2.connect(cloud_url)
-            logger.info(f"Successfully connected to Cloud Database ({ENV} mode): {cloud_url.rsplit('/', 1)[-1]}")
+            conn = BigQueryConnectionWrapper(BIGQUERY_PROJECT, db_name)
+            logger.info(f"Successfully connected to GCP BigQuery ({ENV} mode), Dataset: {db_name}")
+            initialize_bq_schema(conn.client, db_name)
             return conn
         except Exception as e:
-            logger.error(f"Failed to connect to cloud database: {e}. Falling back to local SQLite.")
+            logger.error(f"Failed to connect to BigQuery: {e}. Falling back to local SQLite.")
     
     # Fallback to local persistent SQLite file
     import sqlite3

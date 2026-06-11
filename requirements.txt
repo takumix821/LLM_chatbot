@@ -10,3 +10,8 @@ python-dotenv>=1.0.0
 pydantic>=2.0
 numpy
 pandas
+google-cloud-bigquery
+fastapi
+uvicorn
+line-bot-sdk
+

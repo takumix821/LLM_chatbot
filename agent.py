@@ -87,8 +87,9 @@ def get_user_profile(session_id: str, conn) -> Dict[str, Any]:
             "interested_metrics": ["Gross Margin", "Capex"]
         }
     }
+    cursor.execute("DELETE FROM user_profiles WHERE user_namespace = ?", (session_id,))
     cursor.execute(
-        "INSERT OR REPLACE INTO user_profiles (user_namespace, profile_data) VALUES (?, ?)",
+        "INSERT INTO user_profiles (user_namespace, profile_data) VALUES (?, ?)",
         (session_id, json.dumps(default_profile))
     )
     conn.commit()
@@ -96,8 +97,9 @@ def get_user_profile(session_id: str, conn) -> Dict[str, Any]:
 
 def save_user_profile(session_id: str, profile: Dict[str, Any], conn):
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_profiles WHERE user_namespace = ?", (session_id,))
     cursor.execute(
-        "INSERT OR REPLACE INTO user_profiles (user_namespace, profile_data) VALUES (?, ?)",
+        "INSERT INTO user_profiles (user_namespace, profile_data) VALUES (?, ?)",
         (session_id, json.dumps(profile))
     )
     conn.commit()

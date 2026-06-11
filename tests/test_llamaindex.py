@@ -28,6 +28,13 @@ def test_extract_sec_metadata():
 
 def test_ingestion_pipeline_run(tmp_path):
     """Test the complete LlamaIndex ingestion pipeline execution."""
+    # 1. Clear database table to isolate this test case
+    conn = config.get_database_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM segmented_nodes")
+    conn.commit()
+    conn.close()
+
     # Write a temporary mock report file
     mock_dir = tmp_path / "mock_data"
     mock_dir.mkdir()
@@ -42,9 +49,9 @@ def test_ingestion_pipeline_run(tmp_path):
         "Capital expenditure Capex is controlled."
     )
     
-    # Initialize pipeline with mock directory
+    # Initialize pipeline with mock directory and force re-indexing
     pipeline = IngestionPipeline(data_dir=str(mock_dir))
-    vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline()
+    vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline(force_reindex=True)
     
     # Check that indices were built successfully
     assert vector_index is not None
