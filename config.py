@@ -385,32 +385,21 @@ def get_llamaindex_llm(model_type: str = None):
 def get_llamaindex_embedding(model_type: str = None):
     """
     Initializes a LlamaIndex Embedding model.
-    Falls back to MockLlamaIndexEmbedding when testing or if keys are missing.
+    Falls back to MockLlamaIndexEmbedding when testing.
+    Uses HuggingFace BAAI/bge-small-zh-v1.5 for local and cloud run.
     """
     if is_testing():
         logger.info("Test environment detected. Forcing Mock LlamaIndex Embedding.")
         return MockLlamaIndexEmbedding()
         
-    provider = model_type or MODEL_TYPE
-    logger.info(f"Initializing LlamaIndex Embedding for provider: {provider}")
-    
-    if provider == "openai" and OPENAI_API_KEY:
-        try:
-            from llama_index.embeddings.openai import OpenAIEmbedding
-            return OpenAIEmbedding(api_key=OPENAI_API_KEY)
-        except Exception as e:
-            logger.warning(f"Failed to load OpenAIEmbedding: {e}. Falling back to mock.")
-            
-    elif provider == "google_gemini" and GEMINI_API_KEY:
-        try:
-            from llama_index.embeddings.gemini import GeminiEmbedding
-            return GeminiEmbedding(api_key=GEMINI_API_KEY)
-        except Exception as e:
-            logger.warning(f"Failed to load GeminiEmbedding: {e}. Falling back to mock.")
-            
-    # Fallback to mock embedding
-    logger.info("Using Mock LlamaIndex Embedding for local run.")
-    return MockLlamaIndexEmbedding()
+    logger.info("Initializing HuggingFace BAAI/bge-small-zh-v1.5 Embedding for local and cloud run.")
+    try:
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+        return HuggingFaceEmbedding(model_name="BAAI/bge-small-zh-v1.5")
+    except Exception as e:
+        logger.warning(f"Failed to load HuggingFaceEmbedding: {e}. Falling back to mock.")
+        return MockLlamaIndexEmbedding()
+
 
 def get_line_webhook_config():
     """

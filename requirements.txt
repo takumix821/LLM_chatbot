@@ -15,5 +15,4 @@ fastapi
 uvicorn
 line-bot-sdk
 playwright>=1.40.0
-
-
+llama-index-embeddings-huggingface>=0.3.0
