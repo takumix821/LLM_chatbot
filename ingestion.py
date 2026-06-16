@@ -2,7 +2,7 @@ import os
 import re
 import logging
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
-from llama_index.core.node_parser import SemanticSplitterNodeParser, SentenceWindowNodeParser
+from llama_index.core.node_parser import SentenceWindowNodeParser
 from llama_index.core.indices.keyword_table import SimpleKeywordTableIndex
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.retrievers import QueryFusionRetriever
@@ -133,26 +133,16 @@ class IngestionPipeline:
                 doc.metadata.update(extracted)
                 logger.info(f"Extracted document metadata: {doc.metadata}")
                 
-            # 2. Semantic Node Parser
-            semantic_parser = SemanticSplitterNodeParser(
-                buffer_size=1, 
-                breakpoint_percentile_threshold=95,
-                embed_model=self.embed_model
-            )
-            
-            # 3. Sentence Window Parser
+            # 2. Optimized Sentence Window Parser (Direct parsing to preserve boundary context)
             window_parser = SentenceWindowNodeParser(
-                window_size=3,
+                window_size=2,  # Optimized: returns target sentence + 2 sentences before & after
                 window_metadata_key="window",
                 original_text_metadata_key="original_text"
             )
             
-            # Parse documents to nodes
-            logger.info("Parsing documents with Semantic Splitter...")
-            semantic_nodes = semantic_parser.get_nodes_from_documents(documents)
-            
-            logger.info("Parsing semantic nodes with Sentence Window...")
-            final_nodes = window_parser.get_nodes_from_documents(semantic_nodes)
+            # Parse documents directly to nodes
+            logger.info("Parsing documents with Sentence Window (window_size=2)...")
+            final_nodes = window_parser.get_nodes_from_documents(documents)
             
             logger.info(f"Successfully processed {len(documents)} document(s) into {len(final_nodes)} sentence-window nodes. Generating embeddings...")
             
