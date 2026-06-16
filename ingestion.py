@@ -49,6 +49,12 @@ def extract_shopee_article_metadata(text: str) -> dict:
         
     return metadata
 
+def split_chinese_sentences(text: str) -> list[str]:
+    """Splits Chinese text into sentences by common punctuation and newlines."""
+    pattern = r'(?<=[。！？\n])'
+    sentences = re.split(pattern, text)
+    return [s.strip() for s in sentences if s.strip()]
+
 class IngestionPipeline:
     def __init__(self, data_dir: str = "mock_data"):
         self.data_dir = data_dir
@@ -137,7 +143,8 @@ class IngestionPipeline:
             window_parser = SentenceWindowNodeParser(
                 window_size=2,  # Optimized: returns target sentence + 2 sentences before & after
                 window_metadata_key="window",
-                original_text_metadata_key="original_text"
+                original_text_metadata_key="original_text",
+                sentence_splitter=split_chinese_sentences
             )
             
             # Parse documents directly to nodes
