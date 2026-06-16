@@ -117,55 +117,81 @@ def clean_html_content(html_str: str) -> str:
 
 def fetch_shopee_article(article_id: int) -> dict:
     """
-    Attempts to fetch article content from Shopee Seller Education URL.
+    Attempts to fetch article content from Shopee Seller Education URL using Playwright.
     Falls back to mock data if blocked or error.
     """
     url = f"https://seller.shopee.tw/edu/article/{article_id}"
-    logger.info(f"Attempting to crawl article: {url}")
-    
-    # Try fetching with standard headers to bypass basic blocks
-    req = urllib.request.Request(
-        url,
-        headers={
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://seller.shopee.tw/edu/articles'
-        }
-    )
+    logger.info(f"Attempting to crawl article: {url} using Playwright")
     
     try:
-        # Set a short timeout of 5 seconds to keep it responsive
-        with urllib.request.urlopen(req, timeout=5) as response:
-            html = response.read().decode('utf-8')
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            # Launch Chromium in headless mode
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            page = context.new_page()
             
-            # Simple BeautifulSoup Parsing
+            logger.info(f"Navigating browser to: {url}")
+            # Go to URL and wait for page to render
+            page.goto(url, wait_until="load", timeout=15000)
+            
+            # Wait for article title or container to load
+            try:
+                page.wait_for_selector("h1", timeout=8000)
+            except Exception:
+                logger.warning("Timeout waiting for 'h1' selector, attempting to parse DOM anyway.")
+                
+            # Extra wait for dynamic API rendering inside SPA
+            page.wait_for_timeout(2000)
+            
+            html = page.content()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Extract fields (selectors are typical, but dynamic pages might fail)
+            # Extract fields
             title_tag = soup.find('h1') or soup.find(class_='article-title') or soup.find('title')
-            title = title_tag.get_text().strip() if title_tag else f"蝦皮賣家百科文章 {article_id}"
+            title = title_tag.get_text().strip() if title_tag else ""
             
+            if not title or title == "Seller Education Hub":
+                title = f"蝦皮賣家百科文章 {article_id}"
+                
             # Extract content
-            body_div = soup.find(class_='article-content') or soup.find(class_='markdown-body') or soup.find('body')
+            body_div = soup.find(class_='article-content') or soup.find(class_='markdown-body') or soup.find('article') or soup.find('body')
             content = clean_html_content(str(body_div)) if body_div else ""
             
-            # Categories could be extracted from breadcrumbs if present
+            # Categories extraction from breadcrumbs
             category = "賣場營運"
             sub_category = "平台政策"
-            breadcrumbs = soup.find(class_='breadcrumbs') or soup.find(class_='navigation')
+            breadcrumbs = soup.find(class_='breadcrumbs') or soup.find(class_='navigation') or soup.find(class_='breadcrumb-container')
             if breadcrumbs:
                 crumbs = [c.get_text().strip() for c in breadcrumbs.find_all('a')]
+                if not crumbs:
+                    crumbs = [c.get_text().strip() for c in breadcrumbs.find_all(['span', 'div']) if c.get_text().strip()]
+                crumbs = [c for c in crumbs if c and c not in ["首頁", "Home", ">"]]
+                if len(crumbs) > 0:
+                    category = crumbs[0]
                 if len(crumbs) > 1:
-                    category = crumbs[1]
-                if len(crumbs) > 2:
-                    sub_category = crumbs[2]
+                    sub_category = crumbs[1]
+            else:
+                nav_items = soup.find_all(class_='breadcrumb-item')
+                if nav_items:
+                    crumbs = [n.get_text().strip() for n in nav_items if n.get_text().strip()]
+                    crumbs = [c for c in crumbs if c and c not in ["首頁", "Home"]]
+                    if len(crumbs) > 0:
+                        category = crumbs[0]
+                    if len(crumbs) > 1:
+                        sub_category = crumbs[1]
+                        
+            browser.close()
             
             # If parsed content is too empty or suspicious, force fallback
             if len(content) < 100 or "javascript" in content.lower():
                 raise ValueError("Parsed content is too short or invalid (dynamic rendering block).")
                 
-            logger.info(f"Successfully crawled article {article_id} via live request.")
+            logger.info(f"Successfully crawled article {article_id} via Playwright.")
             return {
                 "url": url,
                 "title": title,
@@ -175,7 +201,7 @@ def fetch_shopee_article(article_id: int) -> dict:
             }
             
     except Exception as e:
-        logger.warning(f"Failed to crawl article {article_id} via live HTTP ({e}). Falling back to mock article database.")
+        logger.warning(f"Failed to crawl article {article_id} via Playwright ({e}). Falling back to mock article database.")
         
         # Fallback to local mock data
         if article_id in MOCK_ARTICLES:
@@ -193,7 +219,7 @@ def fetch_shopee_article(article_id: int) -> dict:
                     f"這是蝦皮賣家幫助中心第 {article_id} 號文章的內容備份。\n\n"
                     "本文章提供賣家關於賣場營運、系統設定、顧客服務與平台規範的詳細說明。\n"
                     "主要內容包含如何提高出貨效率、優化聊聊回覆速度，以及配合蝦皮各大促銷節慶的行銷指南。\n"
-                    "建議賣家定期檢查「賣家數據中心」中的「賣場表現」儀表板，以確認未出貨率和延遲出貨率皆符合平台標準，避免違規計分影響賣場權益。"
+                    "建議賣家定期檢查「賣家數據中心」中的「賣場表現」儀表板，以確認未出貨率 and 延遲出貨率皆符合平台標準，避免違規計分影響賣場權益。"
                 )
             }
 

@@ -14,4 +14,6 @@ google-cloud-bigquery
 fastapi
 uvicorn
 line-bot-sdk
+playwright>=1.40.0
+
 
