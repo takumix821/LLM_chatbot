@@ -11,19 +11,19 @@ import config
 
 logger = logging.getLogger("LLMChatbotIngestion")
 
-def extract_sec_metadata(text: str) -> dict:
+def extract_shopee_article_metadata(text: str) -> dict:
     """
-    Extracts SEC metadata from document text using regular expressions.
-    Fields to extract: Company Code, Fiscal Year, Quarter, Document Type, Key Metrics.
+    Extracts Shopee article metadata from document text using regular expressions.
+    Fields to extract: URL, Title, Category, Sub-Category, Tags.
     """
     metadata = {}
     
     # Regex patterns for metadata extraction
     patterns = {
-        "company_code": r"Company Code:\s*([A-Z0-9]+)",
-        "fiscal_year": r"Fiscal Year:\s*([0-9]{4})",
-        "quarter": r"Quarter:\s*(Q[1-4])",
-        "doc_type": r"Document Type:\s*(SEC Form [0-9a-zA-Z\-]+|SEC [a-zA-Z0-9\s]+)"
+        "url": r"Article URL:\s*(.*)",
+        "title": r"Article Title:\s*(.*)",
+        "category": r"Category:\s*(.*)",
+        "sub_category": r"Sub-Category:\s*(.*)"
     }
     
     for key, pattern in patterns.items():
@@ -31,19 +31,21 @@ def extract_sec_metadata(text: str) -> dict:
         if match:
             metadata[key] = match.group(1).strip()
             
-    # Look for key indicators/metrics in the text
-    metrics = []
-    if "Revenue" in text or "營收" in text:
-        metrics.append("Revenue")
-    if "Gross Margin" in text or "毛利率" in text:
-        metrics.append("Gross Margin")
-    if "Net Income" in text or "淨利潤" in text:
-        metrics.append("Net Income")
-    if "Capex" in text or "資本支出" in text:
-        metrics.append("Capex")
+    # Look for key tags in the text
+    tags = []
+    if "手續費" in text or "費率" in text or "費用" in text:
+        tags.append("手續費/費用")
+    if "罰分" in text or "計分" in text or "違規" in text or "扣分" in text:
+        tags.append("計分/違規")
+    if "免運" in text or "運費" in text:
+        tags.append("免運/物流")
+    if "上架" in text or "重覆刊登" in text or "重複刊登" in text or "醫療器材" in text:
+        tags.append("上架規範")
+    if "聊聊" in text or "顧客" in text:
+        tags.append("聊聊與客服")
         
-    if metrics:
-        metadata["important_metrics"] = metrics
+    if tags:
+        metadata["tags"] = tags
         
     return metadata
 
@@ -127,7 +129,7 @@ class IngestionPipeline:
                 
             # Extract global metadata from document contents
             for doc in documents:
-                extracted = extract_sec_metadata(doc.text)
+                extracted = extract_shopee_article_metadata(doc.text)
                 doc.metadata.update(extracted)
                 logger.info(f"Extracted document metadata: {doc.metadata}")
                 

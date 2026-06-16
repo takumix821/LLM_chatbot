@@ -7,6 +7,7 @@ import config
 from ingestion import IngestionPipeline, get_hybrid_search_results
 from agent import FinancialAgent, get_chat_history_helper, get_user_profile, save_user_profile
 from langchain_core.messages import HumanMessage
+from crawler import run_crawler
 
 # Initialize colorama for clean terminal outputs
 init(autoreset=True)
@@ -38,7 +39,7 @@ def reset_database():
         conn.close()
 
 def run_local_demo():
-    print_header("GCP 智能財報分析助手 - 本地測試與展示主程式")
+    print_header("蝦皮賣家百科智能助手 - 本地測試與展示主程式")
     
     # 1. Check directory and create mock data if not existing
     data_dir = "mock_data"
@@ -49,7 +50,12 @@ def run_local_demo():
     vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline()
     
     if fusion_retriever is None:
-        print(f"{Fore.RED}Error: 無法初始化數據管道。請確認 {data_dir}/ 中有放置財報文件。")
+        print(f"{Fore.YELLOW}偵測到尚未建立向量資料，自動啟動爬蟲進行初始化...")
+        run_crawler(data_dir=data_dir)
+        vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline()
+        
+    if fusion_retriever is None:
+        print(f"{Fore.RED}Error: 無法初始化數據管道與蝦皮爬蟲。")
         sys.exit(1)
         
     print(f"{Fore.GREEN}LlamaIndex 數據分塊與混合索引建立成功！")
@@ -75,7 +81,7 @@ def run_local_demo():
         print("1. 測試 LlamaIndex 獨立檢索功能 (語意分塊 + 句子窗口 + 混合 RRF)")
         print("2. 測試 LangChain RAG 代理對話 (包含問題濃縮、防禦性 Prompt、反思機制)")
         print("3. 進行完整交互式問答")
-        print("4. 重置資料庫並重新解析財報 (Reset Database)")
+        print("4. 重置資料庫與重新抓取賣家百科 (Reset & Crawl)")
         print("5. 退出程式")
         
         choice = input("\n請輸入 1, 2, 3, 4 或 5: ").strip()
@@ -83,9 +89,10 @@ def run_local_demo():
         if choice == "1":
             print_header("LlamaIndex 獨立混合檢索測試")
             test_queries = [
-                "2026Q1 營收與毛利率是多少？",
-                "雲端運算業務的營收佔比與表現如何？",
-                "有沒有關於半導體代工服務與 wafer allocation 的描述？"
+                "蝦皮成交手續費與金流服務費如何計算？",
+                "賣家被記罰分會有哪些限制處罰？",
+                "超商免運專案的費率與申請流程是什麼？",
+                "商品上架有哪些重複刊登或禁售規則？"
             ]
             
             for q in test_queries:
@@ -101,7 +108,7 @@ def run_local_demo():
                     print(f"  {Fore.CYAN}  * 節點 ID: {node_id}")
                     print(f"  {Fore.CYAN}  * 字符區間: {start_idx} ~ {end_idx} (長度: {len(node.node.text)} 字)")
                     print(f"  {Fore.CYAN}  * 檢索分數: {node.score:.4f}")
-                    print(f"  {Fore.CYAN}  * 來源文件: {node.node.metadata.get('file_name', 'N/A')}")
+                    print(f"  {Fore.CYAN}  * 來源文章: {node.node.metadata.get('file_name', 'N/A')}")
                     print(f"  {Fore.WHITE}  * 節點內容:\n    {node.node.text}")
                     # Print window context if exists
                     window = node.node.metadata.get("window")
@@ -112,16 +119,16 @@ def run_local_demo():
             print_header("LangChain RAG 代理對話測試")
             
             test_conversation = [
-                "哈囉，今天天氣真好！", # General chitchat -> route to chitchat node
-                "我想查一下 2026Q1 的營收表現？", # Financial RAG -> route to RAG
-                "那麼，那季的毛利率與 Services 營收各是多少？" # Follow-up -> query enhancement -> RAG
+                "哈囉，你好！", # General chitchat -> route to chitchat node
+                "請問蝦皮的手續費是怎麼收取的？", # Shopee RAG -> route to RAG
+                "那如果賣場被扣分的話會怎麼樣？" # Follow-up -> query enhancement -> RAG
             ]
             
             state = {
                 "messages": [],
                 "standalone_query": "",
                 "context_nodes": [],
-                "instructions": "你是一個專業的智能財報分析助手。",
+                "instructions": "你是一個專業的蝦皮賣家百科智能助手。",
                 "user_profile": profile,
                 "validation_status": "",
                 "session_id": session_id
@@ -194,14 +201,17 @@ def run_local_demo():
                     break
                     
         elif choice == "4":
-            print_header("重置資料庫並重新解析財報中...")
+            print_header("重置資料庫並重新抓取賣家百科...")
             reset_database()
             
-            # Re-run pipeline and reload DB connection
-            print(f"{Fore.YELLOW}重新解析文件並計算向量儲存至資料庫...")
-            vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline(force_reindex=True)
+            # Re-run crawler to download/mock articles and index them
+            print(f"{Fore.YELLOW}啟動爬蟲模組抓取最新文章並寫入向量資料庫...")
+            run_crawler(data_dir=data_dir)
+            
+            # Rebuild indices and retriever
+            vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline(force_reindex=False)
             if fusion_retriever is None:
-                print(f"{Fore.RED}Error: 無法初始化數據管道。請確認 {data_dir}/ 中有放置財報文件。")
+                print(f"{Fore.RED}Error: 無法初始化數據管道。")
                 sys.exit(1)
             
             conn = config.get_database_connection()
@@ -211,7 +221,7 @@ def run_local_demo():
             # Rebuild agent
             agent = FinancialAgent(retriever=fusion_retriever)
             graph = agent.build_graph()
-            print(f"{Fore.GREEN}重新解析與代理初始化完成！")
+            print(f"{Fore.GREEN}重新抓取、解析與代理初始化完成！")
             
         elif choice == "5":
             print(f"\n{Fore.GREEN}謝謝使用，再見！")

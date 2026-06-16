@@ -20,7 +20,7 @@ logging.getLogger("LLMChatbotConfig").setLevel(logging.WARNING)
 logging.getLogger("LLMChatbotIngestion").setLevel(logging.WARNING)
 logging.getLogger("LLMChatbotAgent").setLevel(logging.WARNING)
 
-app = FastAPI(title="GCP Financial Chatbot LINE Webhook Server")
+app = FastAPI(title="GCP Shopee Seller Encyclopedia Chatbot LINE Webhook Server")
 
 # Retrieve LINE credentials from config
 line_config = config.get_line_webhook_config()
@@ -32,7 +32,7 @@ logger.info("[Server Init] Initializing Ingestion Pipeline and Retrievers...")
 pipeline = IngestionPipeline(data_dir="mock_data")
 vector_index, keyword_index, fusion_retriever = pipeline.run_pipeline()
 if fusion_retriever is None:
-    logger.error("[Server Init] Failed to initialize RAG pipeline. Ensure mock_data directory has financial reports.")
+    logger.warning("[Server Init] Failed to initialize RAG pipeline. Ensure mock_data directory has crawled seller articles (running crawler first may be required).")
 else:
     logger.info("[Server Init] RAG Pipeline initialized successfully.")
 
@@ -87,7 +87,7 @@ def handle_message(event):
             "messages": [],
             "standalone_query": "",
             "context_nodes": [],
-            "instructions": "你是一個專業的智能財報分析助手。請簡短精煉、精準地回答使用者的問題。",
+            "instructions": "你是一個專業的蝦皮賣家百科智能助手。請簡短精煉、精準地回答賣家的問題。",
             "user_profile": profile,
             "validation_status": "",
             "session_id": user_id

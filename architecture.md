@@ -1,6 +1,6 @@
-# GCP 智能財報分析助手：系統架構與設計文件 (Architecture Design)
+# 蝦皮賣家百科智能助手：系統架構與設計文件 (Architecture Design)
 
-本文件詳細記錄了「智能財報分析助手」的系統架構、技術堆疊、核心運作流程，以及針對財報專有場景（如表格解析與向量空間微調）的優化路線圖。
+本文件詳細記錄了「蝦皮賣家百科智能助手」的系統架構、技術堆疊、核心運作流程，以及針對電商平台政策頻繁變動（如成交費率調升、違規計分新制）與計算服務費等專有場景的優化路線圖。
 
 ---
 
@@ -9,22 +9,27 @@
 本系統採用 **RAG (檢索增強生成)** 架構，並結合了 **LlamaIndex 的高效率檢索** 與 **LangChain/LangGraph 的 Agent 狀態管理及工作流控制**。
 
 系統區分為兩個獨立且互補的管道：
-1. **離線預處理管道 (Offline Ingestion & Indexing Pipeline)**：負責將大量的非結構化財報文件轉換為可檢索的向量與結構化數據。
-2. **在線對話生成管道 (Online Querying & Agentic Flow)**：負責在使用者提問時，即時搜尋相關數據並透過大語言模型（LLM）生成回答。
+1. **離線手動爬蟲與預處理管道 (Offline Ingestion & Indexing Pipeline)**：負責定期或手動在 GCP VM/Job 觸發 `crawler.py`，爬取蝦皮賣家中心文章並寫入向量與結構化數據至資料庫，以此大幅省下昂貴的自動定時掃描成本。
+2. **在線對話生成管道 (Online Querying & Agentic Flow)**：負責在賣家提問時（透過 LINE 或 CLI），即時檢索政策庫並透過大語言模型（LLM）生成回答。
 
 ```mermaid
 flowchart TD
-    subgraph 離線預處理 (Offline Indexing)
-        GCS[(Google Cloud Storage)] -->|讀取 PDF/TXT| Reader[SimpleDirectoryReader]
+    subgraph 離線爬蟲與寫入 (Offline Manual Indexing)
+        Trigger[手動觸發 Job / VM] -->|執行 crawler.py| Scraper{蝦皮爬蟲邏輯}
+        Scraper -->|實時 HTTP 抓取| Live[蝦皮幫助中心官網]
+        Scraper -->|被擋 Fallback| Mock[內建賣家百科 Mock 資料]
+        Live -->|下載為文字檔| TextFiles[mock_data/*.txt]
+        Mock -->|寫入文字檔| TextFiles
+        TextFiles -->|讀取與 metadata 標註| Reader[SimpleDirectoryReader]
         Reader -->|文章分段| Splitter[Semantic & Sentence Window Splitter]
         Splitter -->|計算向量| Embed[Vertex AI/Gemini Embedding]
-        Embed -->|儲存| BigQuery[(GCP BigQuery Data Store)]
+        Embed -->|資料寫入| BigQuery[(GCP BigQuery / SQLite)]
     end
 
-    subgraph 在線對話 (Online Querying)
-        User[使用者問題] -->|意圖路由| Router{LangGraph Intent Router}
-        Router -->|專業財報問題| Condense[問題濃縮 / Standalone Query]
-        Router -->|一般對話| Chat[閒聊節點 / Chitchat Node]
+    subgraph 在線對話與檢索 (Online LINE Chatbot)
+        User[賣家問題: 運費/手續費] -->|意圖路由| Router{LangGraph Intent Router}
+        Router -->|賣場經營與費率政策| Condense[問題濃縮 / Standalone Query]
+        Router -->|日常對話/招呼| Chat[閒聊節點 / Chitchat Node]
         
         Condense -->|檢索問題向量| Retrieve[混合檢索 QueryFusionRetriever]
         BigQuery -.->|相似度比對| Retrieve
@@ -32,135 +37,77 @@ flowchart TD
         
         Filter -->|XML 隔離上下文| LLM[LLM 回答生成]
         LLM -->|輸出校驗| Validate{Security Validation}
-        Validate -->|通過| Reflect[Reflection Node 更新 Prefs]
+        Validate -->|通過| Reflect[Reflection Node 更新賣家偏好]
         Validate -->|安全漏洞| Block[攔截並警示]
     end
 ```
 
 ---
 
-## 2. 離線預處理管道 (Offline Indexing)
+## 2. 離線預處理與爬蟲管道 (Offline Indexing)
 
-本階段的主要任務是將財報文件碎片化並建立向量化資料庫。
+本階段的主要任務是抓取賣家百科文章並將其碎片化建立向量化資料庫。
 
 ### 核心技術與步驟：
-1. **資料載入 (Ingestion)**：
-   * **技術**：LlamaIndex `SimpleDirectoryReader` 搭配 GCS 連接器。
-   * **作用**：異步讀取 PDF/TXT 等源檔案。
+1. **資料爬取 (Crawling)**：
+   - 使用 `crawler.py` 運行，包含 Live 實時獲取和 Mock 高品質備份機制，以防止被蝦皮的反爬蟲機制（如 Cloudflare）完全阻斷。
+   - 將文章格式化輸出為帶有 `Article URL`、`Article Title`、`Category` 與 `Sub-Category` 等 Metadata 前綴的文字檔。
 2. **語意分塊 (Semantic Chunking)**：
-   * **技術**：`SemanticSplitterNodeParser` (門檻設為 `95%`)。
-   * **作用**：不同於固定字數的機械切分，此解析器會計算相鄰句子的向量相似度，當語意發生顯著偏離（即主題改變）時才進行切分，保留段落主題的完整性。
+   - **技術**：`SemanticSplitterNodeParser` (門檻設為 `95%`)。
+   - **作用**：計算相鄰句子的向量相似度，當主題發生顯著偏離（例如從成交費率換到金流費率）時才進行切分，保留段落政策的完整性。
 3. **句子窗口標記 (Sentence Window Parsing)**：
-   * **技術**：`SentenceWindowNodeParser` (預設 `window_size=3`)。
-   * **作用**：檢索時只檢索精確的單句（以提高檢索精準度），但在送給 LLM 時，會自動回填該句子前後各 3 句的上下文（確保上下文脈絡不中斷）。
+   - **技術**：`SentenceWindowNodeParser` (預設 `window_size=3`)。
+   - **作用**：檢索時只檢索精確的單句（提高檢索分數合理性），但在送給 LLM 時，會自動回填該句子前後各 3 句的上下文（確保上下文政策說明脈絡不中斷）。
 4. **中介資料提取 (Metadata Extraction)**：
-   * **技術**：正則表達式 (Regex) 與特徵提取器。
-   * **作用**：自動提取 `company_code` (如 AAPL)、`fiscal_year` (如 2026)、`quarter` (如 Q1) 以及 `important_metrics` (如 Revenue, Gross Margin)，以便進行 Metadata 過濾。
+   - **技術**：在 `ingestion.py` 內使用正則表達式，自動提取 `url`、`title`、`category`、`sub_category`，並自動掃描內容關鍵字以打上 tags（如 `手續費/費用`、`計分/違規`、`免運/物流` 等），以便後續檢索過濾。
 5. **向量化與儲存 (Storing)**：
-   * **技術**：Vertex AI Embedding 或 Gemini Embedding，搭配 GCP BigQuery 欄位儲存。
-   * **作用**：將 Nodes 的原始文本、Metadata 與其向量以 JSON 形式（在本地與雲端皆同）儲存於 BigQuery 資料表中，並在服務啟動時載入至記憶體重構 LlamaIndex，確保無本地編譯依賴。
+   - **技術**：Vertex AI Embedding 或 Gemini Embedding，搭配 GCP BigQuery 欄位儲存。
+   - 將 Nodes 的原始文本、Metadata 與其向量以 JSON 形式儲存於 BigQuery 資料表中，或在本地開發時存於 SQLite。
 
 ---
 
 ## 3. 在線對話管道 (Online Querying)
 
-當使用者在終端機或 Line 對話框輸入訊息時，即時運作的工作流。
+當賣家在 LINE 對話框輸入訊息時，即時運作的工作流。
 
 ### 核心技術與步驟：
-1. **對話歷史與意圖路由 (Intent Routing)**：
-   * **技術**：`LangGraph` + BigQuery 連線包裝。
-   * **作用**：自動判定使用者是「日常閒聊」還是「財報數據詢問」，閒聊則直接回覆以省下檢索成本。
+1. **對話歷史與意圖路由 (Intent Router)**：
+   - 區分「日常閒聊」與「賣家政策詢問」，若為閒聊直接回覆以省下檢索與資料庫查詢成本。
 2. **問題濃縮 (Query Condensing)**：
-   * **技術**：LangChain LLM Chain。
-   * **作用**：將多輪對話的歷史脈絡（如：「我想查 Apple」、「那毛利率呢？」）濃縮成一個獨立且完整的查詢句（如：「Apple 的毛利率是多少？」）。
+   - 將多輪對話的歷史脈絡（如：「請問被記點會怎麼樣？」 -> 「那申訴有期限嗎？」）濃縮成一個獨立且完整的查詢句（如：「蝦皮賣家被記違規罰分的申訴期限是多久？」）。
 3. **混合檢索 (Hybrid Search & RRF)**：
-   * **技術**：LlamaIndex `QueryFusionRetriever`。
-   * **作用**：同時進行 **向量檢索**（尋找語意相近的段落）與 **BM25 關鍵字檢索**（精準匹配股票代碼與會計科目如 EBITDA）。使用 **RRF (Reciprocal Rerank Fusion)** 進行結果融合。
+   - 整合向量檢索與 BM25 關鍵字檢索。關鍵字檢索對「成交手續費」、「罰分」、「OK超商」等專有名詞有極佳的精準匹配效果。使用 **RRF (Reciprocal Rerank Fusion)** 進行結果融合。
 4. **相似度過濾 (Similarity Post-processing)**：
-   * **技術**：`SimilarityPostprocessor` (門檻設為 `0.78`，並加入 RRF 檢索的自適應放寬機制)。
-   * **作用**：過濾掉相關性過低的段落，避免干擾 LLM。
+   - `SimilarityPostprocessor` (門檻設為 `0.78`)，過濾掉相關性過低的段落。
 5. **防禦性 Prompt 設計 (Defensive Prompting)**：
-   * **技術**：XML 標籤物理隔離設計。
-   * **作用**：使用 `<context>` 與 `<context_stream>` 將檢索到的外源數據與系統指令徹底隔離，防止「間接提示注入攻擊 (Indirect Prompt Injection)」。
+   - 使用 XML 標籤隔離檢索外源資料，防止使用者或文章內潛在的「間接提示注入攻擊」。
 6. **回答生成與輸出驗證 (Generation & Validation)**：
-   * **技術**：LangChain `initChatModel` 搭配輸出格式檢查。
-   * **作用**：使用 `compact` 引用友善模式合成回答，並由驗證節點檢查內容中是否包含安全注入漏洞，保證合規審計。
-7. **長期記憶與反思 (Reflection & Preferences)**：
-   * **技術**：LangGraph 異步 `Reflection Node`。
-   * **作用**：根據使用者的查詢偏好，動態更新 BigQuery 中的 JSON Profile 指令儲存。
+   - 使用 `compact` 引用友善模式合成回答，並由驗證節點檢查內容中是否包含安全注入漏洞。
+7. **長期記憶與反思 (Reflection & Seller Profiles)**：
+   - 根據賣家所問的主題，自動更新 BigQuery 中儲存的賣家 Profile JSON。例如當賣家詢問多次手續費問題，系統會自動在偏好中寫入關注政策，在後續對話中主動以更清晰的手續費架構回應。
 
 ---
 
-## 4. 當前優化路線圖 (Next Steps & Tuning Roadmap)
+## 4. 當前優化路線圖 (Tuning Roadmap)
 
-誠如您在測試中所觀察到的，初版 RAG 在某些細節上仍有優化空間，我們將在完整流程跑通後，針對以下兩點進行深度優化：
+針對電商賣家百科特定的業務挑戰，我們將持續優化以下三個方向：
 
-### 優化方向 1：解決斷句方式不自然與表格過長問題 (Chunking & Table Optimization)
-* **問題**：對於含有表格的財報，標準 PDF 讀取器 (PyPDF) 按行流式讀取會破壞表格的二維結構，且句子分割器會將整張表格誤判為單一巨型句子。
-* **優化方案**：
-  1. **導入版面配置分析 (Layout-Aware) 讀取器**：改用 **`LlamaParse`**，將 PDF 自動解析為結構完整的 Markdown Tables，保持行與列的對應關係。
-  2. **自定義斷句正則表達式**：在 `SentenceWindowNodeParser` 中，設定表格換行符 `\n` 或 `|` 為句子邊界。
-  3. **混合分塊策略**：結合 `MarkdownNodeParser`，專門識別 Markdown 表格與階層，並對表格採取「單行/單列」或「Summary 提取」的方式處理。
-  4. **下調 Window Size**：將 `window_size` 限制在 `1` 或 `2`，防止上下文贅言過多。
+### 優化方向 1：平台政策異動檢測 (Policy Update Tracking)
+* **問題**：蝦皮手續費與罰分規則常在雙十一、年中或每季進行微調，資料庫中的文章可能會過期。
+* **方案**：在爬蟲 `crawler.py` 抓取文章時，記錄網頁的更新時間（`update_time`），並與資料庫現有 Node 做比對。若官網文章有更新，則自動覆寫資料庫內舊有的節點，以保持檢索庫的絕對精準。
 
-### 優化方向 2：提升檢索分數合理性與向量微調 (Embedding & Reranking Tuning)
-* **問題**：預設的通用向量模型對「財務術語」的敏感度不足，時間格式不一致（例如 2026Q1 與 115年第一季）造成檢索漂移，且極易誤檢索到非損益表的後方「附註 (Notes) 頁面」。
-* **優化方案**：
-  1. **時間格式與詞彙預對齊**：在 LangChain 的問題濃縮節點（Query Condensing），教導 LLM 在生成 Standalone Query 時，自動將西元季度（如 `2026Q1`）翻譯為台灣財報常用的民國格式（如 `115年第一季`），提高檢索匹配率。
-  2. **過濾 / 排除附註頁面**：在 Ingestion 階段，利用頁碼與正則表達式，對 Node 標註 `section=main_statement` 或 `section=notes`。在對話檢索時，硬性過濾排除 `notes` 部分，僅對綜合損益表與資產負債表進行檢索，以精準鎖定核心數據。
-  3. **導入 Cohere Reranker (精排模型)**：在向量初篩後，使用專門的 Cross-Encoder 模型（如 `CohereRerank`）進行精準重排，該模型對於微小的數值差異與會計術語有極高的分辨力。
-  4. **選用財報專用 Embedding**：例如改用 `Voyage-Finance`（專為金融領域優化的向量模型），它在財務相關的語意空間投影比通用模型更精確。
-  5. **Metadata 預過濾**：在進行相似度計算前，先根據 `company_code` 與 `fiscal_year` 進行 SQL 等級的硬性過濾，將檢索範圍縮小到目標財報，徹底避免跨年分、跨公司的數據混淆。
+### 優化方向 2：手續費精準計算工具 (Calculator Tool Integration)
+* **問題**：LLM 處理數學計算（如手續費率 7.5% 與金流費 2% 的加總與乘法）常會發生微小數值計算錯誤，不適合直接輸出給賣家。
+* **方案**：在 LangGraph 中加入手續費計算工具 (Calculator Agent Tool)。當偵測到賣家想計算特定金額（如：「一千元的衣服實收多少？」）時，Agent 會自動提取 RAG 中的費率數字，丟給 Python 計算引擎進行運算，輸出精確無誤的對帳單明細。
+
+### 優化方向 3：賣場狀態上下文記憶 (Multi-turn Shop Profile Memory)
+* **問題**：不同賣家等級（新賣家、優選賣家、商城賣家）或品類（3C、女裝）所適用的成交費率與處罰豁免權完全不同。
+* **方案**：在 `user_profiles` 中持久化記錄賣家的賣場狀態（如 `experience_level` 與 `shop_category`）。在執行 RAG 對話生成時，自動將賣家 Profile 當作 Context 餵給 LLM，使其回答能客製化（如：「由於您是女裝類別賣家，您的成交手續費為 7.5%...」）。
 
 ---
 
-## 5. Token 節省與效能優化設計 (Token Saving & Performance Optimization) [NEW]
+## 5. Token 節省與效能優化設計 (Token Saving)
 
-為降低 LLM API 呼叫成本與減少延遲，本架構在多個流程節點實作了 Token 節省策略：
-
-### 5.1 閒聊路由分流與字數硬限制
-* **設計**：透過 LangGraph 意圖路由直接分流日常對話。閒聊節點在 System Prompt 中被加入 `「限 30 字以內」` 的硬性長度約束。
-* **效果**：避免模型生成贅詞，平均每次閒聊呼叫可節省約 50 ~ 100 Tokens。
-
-### 5.2 緊湊模式回答 (Compact RAG Response)
-* **設計**：在 RAG 合成回答節點中，明確注入安全性與簡潔指令：
-  * 「強制使用 compact 模式：文字精鍊，直指要點。」
-  * 「回答必須極其簡短，嚴禁重複描述，長度限制在 150 字以內，優先使用條列或表格。」
-* **效果**：縮減高達 60% 的生成 Token 數，且表格或條列形式更利於審計合規。
-
-### 5.3 程序記憶與指令優化限制 (Reflection Node Constraints)
-* **設計**：在 LangGraph 反思節點優化 System Prompt 時，限制 LLM 生成的新指令在 `150 字以內`，且「極度簡練，排除贅詞」。
-* **效果**：防止反思出的 System Instructions 隨時間不斷膨脹（避免過度累積 Prompt context 導致後續對話成本遞增）。
-
----
-
-## 6. 資料庫架構與環境分離設計 (Database Schema & Environment Separation) [NEW]
-
-為達到本地開發測試的實體儲存以及雲端部署的環境隔離，本系統設計了完整的資料庫儲存方案：
-
-### 6.1 資料表 Schema 設計 (schema.sql)
-專案內定義了 [schema.sql](file:///Users/alionking821/Documents/LLM_chatbot/schema.sql)，並在本地或雲端初始化時自動執行，包含以下三個核心資料表：
-
-1. **`chat_history` (對話歷史紀錄表)**：
-   * 用於持久化多輪對話歷史。
-   * 包含欄位：`id` (主鍵)、`session_id` (對話識別碼)、`message_type` ('human' 或 'ai')、`content` (訊息內文)、`timestamp` (時間戳記)。
-2. **`user_profiles` (使用者偏好與程序記憶表)**：
-   * 用於儲存使用者的投資偏好、風險度及從對話中學習到的提取知識 (Extracted Knowledge)。
-   * 包含欄位：`user_namespace` (隔離標籤，通常為 session_id)、`profile_data` (JSON 字串，包含偏好配置)。
-3. **`segmented_nodes` (財報分段與向量索引表)**：
-   * 用於存取財報向量數據。
-     * **Ingestion 階段**：將 LlamaIndex 切分好的 TextNode 文字、Metadata（以 JSON 格式）、以及生成的 Embedding 向量（以 JSON 陣列格式 `[0.12, -0.45, ...]`）儲存至資料表中。
-     * **Querying / 啟動階段**：如果 LlamaIndex 還沒有建立記憶體索引，則直接從 `segmented_nodes` 表中讀取所有節點與向量，在記憶體中還原為 `TextNode` 並重建 `VectorStoreIndex`。這確保了本地開發測試的持久性，同時避免了在 macOS 上編譯/安裝複雜環境依賴。
-   * 包含欄位：`node_id` (LlamaIndex 節點 ID)、`file_name` (來源財報檔名)、`text_content` (分塊文字)、`embedding_vector` (向量 JSON 陣列字串)、`metadata_json` (起點、會計季度、頁碼等中介資料的 JSON 字串)、`created_at` (時間戳記)。
-
-### 6.2 本地與雲端環境分離策略
-本系統透過 ENV 環境變數與 BIGQUERY_PROJECT 的存在判定來控制資料庫連線目標：
-
-* **本地開發測試 (Local Environment)**：
-  * 當環境中未配置 BIGQUERY_PROJECT 時，連線至專案底下的本地 SQLite 實體資料庫檔案 LLM_chatbot_dev.db。
-  * LLM_chatbot_dev.db 以及所有 *.db 檔案均已被加入 .gitignore，防止測試數據被 Commit 入庫。
-* **雲端部署環境 (GCP BigQuery)**：
-  * 當配置有 BIGQUERY_PROJECT 時，系統會自動根據 ENV 環境變數動態建立並連線至對應的 Dataset 資料集：
-    * ENV=dev (雲端測試環境)：Dataset 名稱為 LLM_chatbot_dev
-    * ENV=prod (生產環境)：Dataset 名稱為 LLM_chatbot_prod
-  * 系統啟動時會透過 client.create_dataset() 自動確認並初始化對應的 Dataset 與 Tables。
+* **閒聊路由**：日常問候由 `chitchat` 節點在 30 字內直接回覆，不調用 LlamaIndex 檢索。
+* **簡練模式 (Compact RAG)**：回答限制在 150 字以內，優先使用條列或表格呈現，為賣家省去大篇幅文字閱讀時間，同時省下 60% 的 LLM 生成成本。
+* **反思控制**：反思優化指令控制在 150 字以內，防止 System Instructions 因多輪對話無限膨脹。

@@ -218,13 +218,15 @@ class MockLangChainLLM:
         
         # Simple mock reasoning/response logic
         if "VERIFY_SECURE_TOKEN_99" in prompt_str:
-            return AIMessage(content="[Mock LangChain Response] Verification token detected in context. Financial results: Net revenue was $119,575 million with gross margin 45.9%. Operating income was $40,373 million.")
-        elif "2024Q1" in prompt_str or "Revenue" in prompt_str or "營收" in prompt_str:
-            return AIMessage(content="[Mock LangChain Response] 根據 2024Q1 財報數據，Apple Inc. 營收為 1,195.75 億美元（年增 2%），毛利率為 45.9%，淨利潤為 339.16 億美元。")
+            return AIMessage(content="[Mock LangChain Response] 驗證金鑰成功。蝦皮賣家百科：成交手續費率 5.5%，金流服務費 2%，出貨天數限制 2 天。")
+        elif "手續費" in prompt_str or "Fees" in prompt_str or "費用" in prompt_str:
+            return AIMessage(content="[Mock LangChain Response] 根據蝦皮賣家規範，單件商品成交手續費為 5.5% ~ 7.5%（視類別而定），另外金流服務費為 2%（買家刷卡或轉帳皆適用）。")
+        elif "罰分" in prompt_str or "計分" in prompt_str or "違規" in prompt_str:
+            return AIMessage(content="[Mock LangChain Response] 蝦皮賣家計分系統每週一更新。若發生「延遲出貨」或「未出貨率過高」，會被記 1-2 分，累積滿 3 分會限制參加主題活動，滿 6 分則限制編輯商品。")
         elif "優化系統指令" in prompt_str or "update_instructions" in prompt_str:
-            return AIMessage(content="系統指令已優化：請特別專注於 Ticker AAPL 及其毛利率 Gross Margin 與資本支出 Capex 的比對。")
+            return AIMessage(content="系統指令已優化：請特別專注於蝦皮手續費計算規章與賣家違規罰分處置說明。")
         else:
-            return AIMessage(content=f"[Mock LangChain Response] 收到您的訊息。當前的模型配置為 {self.model_type}。請問有什麼我可以協助您的？")
+            return AIMessage(content=f"[Mock LangChain Response] 收到您的訊息。當前的模型配置為 {self.model_type}。我是蝦皮賣家百科助手，請問有什麼我可以協助您的？")
 
 # Mock LLM and Embeddings for LlamaIndex local testing
 from llama_index.core.llms import CustomLLM, CompletionResponse, CompletionResponseGen, LLMMetadata
@@ -247,11 +249,13 @@ class MockLlamaIndexLLM(CustomLLM):
         
     def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
         if "VERIFY_SECURE_TOKEN_99" in prompt:
-            text = "[Mock LlamaIndex Response] Found secure token VERIFY_SECURE_TOKEN_99 in context. Apple FY2024Q1 revenue: $119,575 million. Gross Margin: 45.9%."
-        elif "2024Q1" in prompt or "營收" in prompt:
-            text = "[Mock LlamaIndex Response] 2024Q1 蘋果公司營收達到 1,195.75 億美元（成長 2%），毛利率為 45.9%，主要由 iPhone 與服務收入帶動。"
+            text = "[Mock LlamaIndex Response] Found secure token VERIFY_SECURE_TOKEN_99. Shopee Seller: standard commission is 5.5%, payment service fee is 2%, shipment processing deadline is 2 days."
+        elif "手續費" in prompt or "費用" in prompt:
+            text = "[Mock LlamaIndex Response] 蝦皮賣家成交手續費主要依商品售價乘以手續費率（常態為 5.5% - 7.5%），若有加入免運專案或蝦幣回饋專案會另計合約費率。"
+        elif "罰分" in prompt or "計分" in prompt:
+            text = "[Mock LlamaIndex Response] 蝦皮賣家若單週「延遲出貨率」大於等於 10% 會被記 1 分，大於等於 15% 且延遲訂單大於等於 50 筆會被記 2 分。"
         else:
-            text = "[Mock LlamaIndex Response] 本地 LlamaIndex 測試成功，已檢索相關文檔內容。"
+            text = "[Mock LlamaIndex Response] 本地 LlamaIndex 測試成功，已檢索蝦皮賣家百科相關文章內容。"
         return CompletionResponse(text=text)
         
     def stream_complete(self, prompt: str, **kwargs: Any) -> CompletionResponseGen:
