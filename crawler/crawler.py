@@ -5,11 +5,17 @@ import logging
 import urllib.request
 from bs4 import BeautifulSoup
 
-# Ensure correct path resolution
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Ensure correct path resolution for local run or cloud deployment
+try:
+    import config
+    from ingestion import IngestionPipeline
+except ModuleNotFoundError:
+    import sys
+    import os
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+    import config
+    from ingestion import IngestionPipeline
 
-import config
-from ingestion import IngestionPipeline
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ShopeeSellerCrawler")

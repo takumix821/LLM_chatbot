@@ -1,0 +1,30 @@
+# Use official Playwright Python base image (pre-installed browsers and OS dependencies)
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src:/app \
+    HF_HOME=/app/.cache/huggingface \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake BAAI/bge-small-zh-v1.5 embedding weights
+RUN mkdir -p /app/.cache/huggingface && \
+    python -c "from llama_index.embeddings.huggingface import HuggingFaceEmbedding; HuggingFaceEmbedding(model_name='BAAI/bge-small-zh-v1.5')"
+
+# Copy source code, crawler script, and mock data templates
+COPY src/ ./src/
+COPY crawler/ ./crawler/
+COPY mock_data/ ./mock_data/
+
+# Run the crawler script (designed to run as a Cloud Run Job)
+CMD ["python", "-m", "crawler.crawler"]

@@ -1,13 +1,26 @@
+# Ensure correct path resolution for local CLI run
 import os
 import sys
 import logging
 from colorama import init, Fore, Style
-
-import config
-from ingestion import IngestionPipeline, get_hybrid_search_results
-from agent import FinancialAgent, get_chat_history_helper, get_user_profile, save_user_profile
 from langchain_core.messages import HumanMessage
-from crawler import run_crawler
+
+try:
+    import config
+    from ingestion import IngestionPipeline, get_hybrid_search_results
+    from agent import FinancialAgent, get_chat_history_helper, get_user_profile, save_user_profile
+    from crawler.crawler import run_crawler
+except ModuleNotFoundError:
+    # Add src/ to path
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+    # Add root/ to path (for crawler)
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    import config
+    from ingestion import IngestionPipeline, get_hybrid_search_results
+    from agent import FinancialAgent, get_chat_history_helper, get_user_profile, save_user_profile
+    from crawler.crawler import run_crawler
+
+
 
 # Initialize colorama for clean terminal outputs
 init(autoreset=True)
